@@ -8,11 +8,11 @@ local ALIGNMENT_RULE = CreateConVar( "sv_boids_alignment", "1", FCVAR_NONE, "", 
 local COHESION_RULE = CreateConVar( "sv_boids_cohesion", "1", FCVAR_NONE, "", 0, 1 )
 local NOISE_FACTOR = CreateConVar( "sv_boids_noise_factor", "0.5", FCVAR_NONE, "", 0, 1 )
 local MIN_DIST = CreateConVar( "sv_boids_separation_distances", "5", FCVAR_NONE, "", 2, 50 )
-local SPEED = CreateConVar( "sv_boids_speed", "600", FCVAR_NONE, "", 0, 1000 )
+local SPEED = CreateConVar( "sv_boids_speed", "600", {FCVAR_REPLICATED, FCVAR_ARCHIVE}, "", 0, 1000 )
 local SPAWN_NUMBER = CreateConVar( "sv_boids_spawn_number", "1", FCVAR_NONE, "", 1, 100 )
 local TRACE_LEN = CreateConVar( "sv_boids_trace_lengh", "500", FCVAR_NONE, "", 10, 1000 )
 
-local BOIDS_MODEL = CreateConVar("sv_boids_model", "models/crow.mdl")
+local BOIDS_MODEL = CreateConVar("sv_boids_model", "models/crow.mdl", {FCVAR_REPLICATED, FCVAR_ARCHIVE})
 
 local ALIGNMENT_FACTOR = CreateConVar( "sv_boids_alignment_factor", "0.8", FCVAR_NONE, "", 1, 10 )
 local COHESION_FACTOR = CreateConVar( "sv_boids_cohesion_factor", "1.0", FCVAR_NONE, "", 1, 10 )
@@ -22,6 +22,8 @@ local ORBIT_DISTANCE = CreateConVar( "sv_boids_orbit_distance", "200", FCVAR_NON
 
 local DISTANCE_CHECK = CreateConVar( "sv_boids_distance_check", "1", FCVAR_NONE, "However, check the distance between boids to consider them as neighbors instead of just looking at who is in the cell.", 0, 1 )
 local DISTANCE_CHECK_VALUE = CreateConVar( "sv_boids_distance_check_value", "250", FCVAR_NONE, "", 100, 2000 )
+
+local MINSMAXS_BOUNDS = CreateConVar( "sv_boids_mins_maxs_bounds", "20", FCVAR_NONE, "", 5, 50 )
 
 local NUM_DIRECTIONS = 100
 
@@ -77,16 +79,29 @@ function ENT:NotMyNeighbors( ent )
 end
 
 function ENT:Initialize()
+    // Lag compensation changes everything that is insane
+    self:SetLagCompensated( true )
     self:SetModel(BOIDS_MODEL:GetString())
-    self:PhysicsInit(SOLID_VPHYSICS)
+    self:PhysicsInit(SOLID_NONE)
     self:SetMoveType(MOVETYPE_NOCLIP)
-    self:SetSolid(SOLID_VPHYSICS)
+    self:SetSolid(SOLID_NONE)
     
     self:SetAngles(Angle(math.random(-180, 180), math.random(-180, 180), 0))
 
     self:ResetSequence("fly01") -- "fly01"
     self:SetCycle( math.Rand(0,1) )
     self:SetAutomaticFrameAdvance( true )
+
+    local bounds = MINSMAXS_BOUNDS:GetFloat()
+    local mins = -Vector(bounds,bounds,bounds)
+    local maxs = -mins
+    self:SetCollisionBounds( mins, maxs )
+
+    // For the shared part
+    self.dead = false
+    self.lerp_pos = self:GetPos()
+    self.mins, self.maxs = Vector( -20, -20, -20 ), Vector( 20, 20, 20 )
+    self.dead = false
 end
 
 function ENT:GetNearByOptimized()
@@ -128,17 +143,18 @@ function ENT:ObstacleRay()
         
         local tr = util.TraceLine({
             start = pos,
-            endpos = pos + worldDir * TRACE_LEN:GetFloat(), 
+            endpos = pos + worldDir * TRACE_LEN:GetFloat(),
+            mask = MASK_ALL,
             filter = function( ent ) return self:NotMyNeighbors( ent ) end
         })
         
         
         if not tr.Hit then
             -- developer 1 to see this
-            debugoverlay.Line( tr.StartPos, tr.HitPos, engine.TickInterval()*10, Color( 0, 255, 0, 1), false )
+            debugoverlay.Line( tr.StartPos, tr.HitPos, 0.05, Color( 0, 255, 0, 1), false )
             return worldDir
         end
-        debugoverlay.Line( tr.StartPos, tr.HitPos, engine.TickInterval()*10, Color( 255, 0, 0, 1), false )
+        debugoverlay.Line( tr.StartPos, tr.HitPos, 0.05, Color( 255, 0, 0, 1), false )
     end
     
     
@@ -229,22 +245,29 @@ function ENT:Think()
     steer = steer + VectorRand() * NOISE_FACTOR:GetFloat()
 
     if steer:Length() > 1 then steer:Normalize() end
-
-    local forwardRay = util.QuickTrace(pos, self:GetForward() * TRACE_LEN:GetFloat(), function( ent ) return self:NotMyNeighbors( ent ) end)
     
     local traceDist = TRACE_LEN:GetFloat()
-    local forwardRay = util.QuickTrace(pos, self:GetForward() * traceDist, function(ent) return self:NotMyNeighbors(ent) end)
+    
+    -- local forwardRay = util.QuickTrace(pos, self:GetForward() * traceDist, function(ent) return self:NotMyNeighbors(ent) end)
+
+    local forwardRay = util.TraceLine({
+        start = pos,
+        endpos = pos + self:GetForward() * traceDist,
+        mask = MASK_ALL,
+        filter = function(ent) return self:NotMyNeighbors(ent) end
+    })
     
     // I am having some issues with this escaping shit
     if forwardRay.Hit then
         local escapeDir = self:ObstacleRay()
 
-        local repelPower = (1 - forwardRay.Fraction) * 2 
+        local sub = (1 - forwardRay.Fraction)
+        local repelPower = sub * 2 
         local repulsion = forwardRay.HitNormal * repelPower
         
         local finalEscape = (escapeDir + repulsion):GetNormalized()
 
-        local intensity = (1 - forwardRay.Fraction) 
+        local intensity = sub
         steer = LerpVector(intensity, steer, finalEscape * 10)
     end
 
@@ -262,6 +285,10 @@ function ENT:Think()
     self:SetPos(pos + finalDir * (SPEED:GetFloat() * FrameTime()))
     self:NextThink(CurTime())
     return true
+end
+
+function ENT:OnTakeDamage( dmg )
+    --print(dmg)
 end
 
 function ENT:SpawnFunction(ply, tr, ClassName)
