@@ -11,23 +11,17 @@ local MIN_DIST = CreateConVar( "sv_boids_separation_distances", "5", FCVAR_NONE,
 local SPEED = CreateConVar( "sv_boids_speed", "600", {FCVAR_REPLICATED, FCVAR_ARCHIVE}, "", 0, 1000 )
 local SPAWN_NUMBER = CreateConVar( "sv_boids_spawn_number", "1", FCVAR_NONE, "", 1, 100 )
 local TRACE_LEN = CreateConVar( "sv_boids_trace_lengh", "500", FCVAR_NONE, "", 10, 1000 )
-
 local BOIDS_MODEL = CreateConVar("sv_boids_model", "models/crow.mdl", {FCVAR_REPLICATED, FCVAR_ARCHIVE})
-
 local ALIGNMENT_FACTOR = CreateConVar( "sv_boids_alignment_factor", "0.8", FCVAR_NONE, "", 1, 10 )
 local COHESION_FACTOR = CreateConVar( "sv_boids_cohesion_factor", "1.0", FCVAR_NONE, "", 1, 10 )
 local SEPARATION_FACTOR = CreateConVar( "sv_boids_separation_factor", "1.5", FCVAR_NONE, "", 1, 10 )
 local ORBIT_FACTOR = CreateConVar( "sv_boids_orbit_factor", "1.5", FCVAR_NONE, "", 0, 10 )
 local ORBIT_DISTANCE = CreateConVar( "sv_boids_orbit_distance", "200", FCVAR_NONE, "", 10, 2000 )
-
 local DISTANCE_CHECK = CreateConVar( "sv_boids_distance_check", "1", FCVAR_NONE, "However, check the distance between boids to consider them as neighbors instead of just looking at who is in the cell.", 0, 1 )
 local DISTANCE_CHECK_VALUE = CreateConVar( "sv_boids_distance_check_value", "250", FCVAR_NONE, "", 100, 2000 )
-
 local MINSMAXS_BOUNDS = CreateConVar( "sv_boids_mins_maxs_bounds", "20", FCVAR_NONE, "", 5, 50 )
 
 local NUM_DIRECTIONS = 100
-
-
 local GOLDEN_RATIO = (1 + math.sqrt(5)) / 2
 local ANGLE_INCREMENT = math.pi * 2 * GOLDEN_RATIO
 local CELL_SIZE = CreateConVar( "sv_boids_cell_size", "1000", FCVAR_NONE, "", 50, 2000 )
@@ -48,24 +42,78 @@ for i = 0, NUM_DIRECTIONS - 1 do
     table.insert(BoidDirections, Vector(x, y, z))
 end
 
-BOID_GRID = {}
+-- Chached Functions
+local Vector = Vector
+local Color = Color
+local Angle = Angle
+local IsValid = IsValid
+local CurTime = CurTime
+local SysTime = SysTime
+local FrameTime = FrameTime
+local LerpVector = LerpVector
+local LocalToWorld = LocalToWorld
+local ipairs = ipairs
+local table_insert = table.insert
+local table_sort = table.sort
+local math_sqrt = math.sqrt
+local math_random = math.random
+local math_floor = math.floor
+local util_TraceLine = util.TraceLine
+local debugoverlay_Line = debugoverlay.Line
+local Color = Color
+local ents_FindByClass = ents.FindByClass
+local FrameTime = FrameTime
+local LerpVector = LerpVector
+
+-- MetaTables
+local ent_meta = FindMetaTable("Entity")
+local vec_meta = FindMetaTable("Vector")
+local ang_meta = FindMetaTable("Angle")
+
+-- Cached Meta Functions
+local GetPos = ent_meta.GetPos
+local SetPos = ent_meta.SetPos
+local GetForward = ent_meta.GetForward
+local GetAngles = ent_meta.GetAngles
+local SetAngles = ent_meta.SetAngles
+local GetClass = ent_meta.GetClass
+local NextThink = ent_meta.NextThink
+local IsInWorld = ent_meta.IsInWorld
+local Remove = ent_meta.Remove
+
+-- Cached Vector Functions
+local Length = vec_meta.Length
+local LengthSqr = vec_meta.LengthSqr
+local GetNormalized = vec_meta.GetNormalized
+local Dot = vec_meta.Dot
+local Cross = vec_meta.Cross
+local Distance = vec_meta.Distance
+local DistToSqr = vec_meta.DistToSqr
+local Distance2DSqr = vec_meta.Distance2DSqr
+local Normalize = vec_meta.Normalize
+
+
+-- The one angle function
+local ToAngle = ang_meta.Angle
+
+local BOID_GRID = {}
 hook.Add("Tick", "UpdateBoidGrid", function()
-    BOID_GRID = {} 
+    BOID_GRID = {}
     
     local cell_size = CELL_SIZE:GetFloat()
-    for _, ent in ipairs(ents.FindByClass("boids")) do 
+    for _, ent in ipairs(ents_FindByClass("boids")) do 
         if not IsValid(ent) then continue end
 
         local pos = ent:GetPos()
 
-        local gx = math.floor(pos.x / cell_size)
-        local gy = math.floor(pos.y / cell_size)
-        local gz = math.floor(pos.z / cell_size)
+        local gx = math_floor(pos.x / cell_size)
+        local gy = math_floor(pos.y / cell_size)
+        local gz = math_floor(pos.z / cell_size)
         
         local key = gx .. "|" .. gy .. "|" .. gz
         
         BOID_GRID[key] = BOID_GRID[key] or {}
-        table.insert(BOID_GRID[key], ent)
+        table_insert(BOID_GRID[key], ent)
         
         ent.GridX = gx
         ent.GridY = gy
@@ -73,8 +121,9 @@ hook.Add("Tick", "UpdateBoidGrid", function()
     end
 end)
 
+
 function ENT:NotMyNeighbors( ent )
-    if ent == self or ent:GetClass() == "boids" then return false end
+    if ent == self or GetClass(ent) == "boids" then return false end
     return true
 end
 
@@ -118,11 +167,11 @@ function ENT:GetNearByOptimized()
                 if cell then
                     for _, b in ipairs(cell) do
                         if b != self then
-                            if not DISTANCE_CHECK:GetBool() then table.insert(neighbors, b) continue end
+                            if not DISTANCE_CHECK:GetBool() then table_insert(neighbors, b) continue end
 
-                            local distSqr = b:GetPos():DistToSqr(self:GetPos())
-                            if distSqr < (DISTANCE_CHECK_VALUE:GetInt() ^ 2) then
-                                table.insert(neighbors, b)
+                            local distSqr = DistToSqr( GetPos(b), GetPos(self) )
+                            if distSqr < (DISTANCE_CHECK_VALUE:GetInt() * DISTANCE_CHECK_VALUE:GetInt()) then -- probably better without a ^2
+                                table_insert(neighbors, b)
                             end
                         end
                     end
@@ -134,14 +183,14 @@ function ENT:GetNearByOptimized()
 end
 
 function ENT:ObstacleRay()
-    local pos = self:GetPos()
-    local angles = self:GetAngles()
+    local pos = GetPos( self )
+    local angles = GetAngles( self )
     
     for _, dir in ipairs(BoidDirections) do
         local worldDir = LocalToWorld(dir, Angle(0,0,0), Vector(0,0,0), angles)
         
         
-        local tr = util.TraceLine({
+        local tr = util_TraceLine({
             start = pos,
             endpos = pos + worldDir * TRACE_LEN:GetFloat(),
             mask = MASK_ALL,
@@ -151,23 +200,24 @@ function ENT:ObstacleRay()
         
         if not tr.Hit then
             -- developer 1 to see this
-            debugoverlay.Line( tr.StartPos, tr.HitPos, 0.05, Color( 0, 255, 0, 1), false )
+            debugoverlay_Line( tr.StartPos, tr.HitPos, 0.05, Color( 0, 255, 0, 1), false )
             return worldDir
         end
-        debugoverlay.Line( tr.StartPos, tr.HitPos, 0.05, Color( 255, 0, 0, 1), false )
+        debugoverlay_Line( tr.StartPos, tr.HitPos, 0.05, Color( 255, 0, 0, 1), false )
     end
     
     
-    return -self:GetForward() 
+    return -GetForward( self ) 
 end
 
 function ENT:Think()
-    if DELETE_ON_ESCAPE_REALITY:GetBool() and not self:IsInWorld() then 
-        self:Remove() 
+    --local t = SysTime()
+    if DELETE_ON_ESCAPE_REALITY:GetBool() and not IsInWorld( self ) then 
+        Remove( self ) 
         return 
     end 
     
-    local pos = self:GetPos()
+    local pos = GetPos( self )
     local rawNeighbors = self:GetNearByOptimized()
     local validNeighbors = {}
     
@@ -176,15 +226,15 @@ function ENT:Think()
     for _, ent in ipairs(rawNeighbors) do
         if not IsValid(ent) or ent == self then continue end
         
-        local diff = ent:GetPos() - pos
-        local distSqr = diff:LengthSqr()
+        local diff = GetPos( ent ) - pos
+        local distSqr = LengthSqr( diff )
         
         
-        local toNeighbor = diff:GetNormalized()
-        local dot = self:GetForward():Dot(toNeighbor)
+        local toNeighbor = GetNormalized( diff )
+        local dot = Dot( GetForward( self ), toNeighbor)
     
         if dot > -FOV_THRESHOLD then 
-            table.insert(validNeighbors, {ent = ent, dist = math.sqrt(distSqr)})
+            table_insert(validNeighbors, {ent = ent, dist = math_sqrt(distSqr)})
         end
         
     end
@@ -198,38 +248,38 @@ function ENT:Think()
     
     if numNeighbors > 0 then
         for _, n in ipairs(validNeighbors) do
-            local otherPos = n.ent:GetPos()
+            local otherPos = GetPos( n.ent )
             
             if COLLISION_RULE:GetBool() then
                 local flee = pos - otherPos
-                flee:Normalize()
+                Normalize( flee )
                 separation = separation + (flee / (n.dist / MIN_DIST:GetFloat())) 
             end
             
-            if ALIGNMENT_RULE:GetBool() then alignment = alignment + n.ent:GetForward() end
+            if ALIGNMENT_RULE:GetBool() then alignment = alignment + GetForward( n.ent ) end
             
             if COHESION_RULE:GetBool() then avgPos = avgPos + otherPos end
         end
         
-        if ALIGNMENT_RULE:GetBool() then alignment = (alignment / numNeighbors):GetNormalized() end
-        if COHESION_RULE:GetBool() then cohesion = ((avgPos / numNeighbors) - pos):GetNormalized() end
+        if ALIGNMENT_RULE:GetBool() then alignment = GetNormalized( (alignment / numNeighbors) ) end
+        if COHESION_RULE:GetBool() then cohesion = GetNormalized( ((avgPos / numNeighbors) - pos) ) end
     end
 
     // "dim sum un" idea (https://steamcommunity.com/profiles/76561198146498441)
     
-    local entities = ents.FindByClass("orbit")
+    local entities = ents_FindByClass("orbit")
     local orbitForce = Vector()
     if #entities >= 1 then
-        table.sort( entities, function( a, b ) return pos:Distance2DSqr( a:GetPos() ) <  pos:Distance2DSqr( b:GetPos() ) end)
+        table_sort( entities, function( a, b ) return Distance2DSqr( pos, GetPos( a ) ) <  Distance2DSqr( pos, GetPos( a ) ) end)
         
 
-        local targetPos = entities[1]:GetPos()
-        local distToTarget = pos:Distance(targetPos)
+        local targetPos = GetPos( entities[1] )
+        local distToTarget = Distance( pos, targetPos)
 
         if distToTarget > ORBIT_DISTANCE:GetInt() then
-            local dirToTarget = (targetPos - pos):GetNormalized()
+            local dirToTarget = GetNormalized( targetPos - pos )
 
-            local orbitDir = dirToTarget:Cross(Vector(0, 0, 1)):GetNormalized()
+            local orbitDir = GetNormalized(Cross( dirToTarget, Vector(0, 0, 1)))
 
             orbitForce = (dirToTarget * 0.3) + (orbitDir * 1.0)
 
@@ -244,15 +294,15 @@ function ENT:Think()
     
     steer = steer + VectorRand() * NOISE_FACTOR:GetFloat()
 
-    if steer:Length() > 1 then steer:Normalize() end
+    if Length( steer ) > 1 then Normalize( steer ) end
     
     local traceDist = TRACE_LEN:GetFloat()
     
     -- local forwardRay = util.QuickTrace(pos, self:GetForward() * traceDist, function(ent) return self:NotMyNeighbors(ent) end)
 
-    local forwardRay = util.TraceLine({
+    local forwardRay = util_TraceLine({
         start = pos,
-        endpos = pos + self:GetForward() * traceDist,
+        endpos = pos + GetForward( self ) * traceDist,
         mask = MASK_ALL,
         filter = function(ent) return self:NotMyNeighbors(ent) end
     })
@@ -265,30 +315,29 @@ function ENT:Think()
         local repelPower = sub * 2 
         local repulsion = forwardRay.HitNormal * repelPower
         
-        local finalEscape = (escapeDir + repulsion):GetNormalized()
+        local finalEscape = GetNormalized( escapeDir + repulsion )
 
         local intensity = sub
         steer = LerpVector(intensity, steer, finalEscape * 10)
     end
 
-    if not self:IsInWorld() then
-        local centerDir = (Vector(0,0,0) - pos):GetNormalized()
+    if not IsInWorld( self ) then
+        local centerDir = GetNormalized( Vector(0,0,0) - pos )
         steer = centerDir * 20
     end
 
-    if steer:Length() > 1 then steer:Normalize() end
+    if Length( steer ) > 1 then Normalize( steer ) end
     
-    local currentDir = self:GetForward()
-    local finalDir = (currentDir + steer * 0.1):GetNormalized()
+    local currentDir = GetForward( self )
+    local finalDir = GetNormalized( currentDir + steer * 0.1 )
     
-    self:SetAngles(finalDir:Angle())
-    self:SetPos(pos + finalDir * (SPEED:GetFloat() * FrameTime()))
-    self:NextThink(CurTime())
-    return true
-end
+    SetAngles( self, finalDir:Angle())
+    SetPos( self, pos + finalDir * (SPEED:GetFloat() * FrameTime()) )
+    NextThink( self, CurTime())
 
-function ENT:OnTakeDamage( dmg )
-    --print(dmg)
+    -- print( (SysTime() - t) * 1000 )
+
+    return true
 end
 
 function ENT:SpawnFunction(ply, tr, ClassName)
